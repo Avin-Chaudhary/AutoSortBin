@@ -1,85 +1,233 @@
+import os
 import numpy as np
 from PIL import Image
+import cv2
 
-try:
-    import tflite_runtime.interpreter as tflite
-except ImportError:
-    import tensorflow.lite as tflite
+from ai_edge_litert import interpreter as tflite
 
-# -----------------------------
-# Load TFLite model
-# -----------------------------
-MODEL_PATH = "utility/predictWaste12.tflite"
 
-interpreter = tflite.Interpreter(model_path=MODEL_PATH)
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
+MODEL_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "autosortbin_densenet121_float16.tflite"
+)
+
+IMG_SIZE = 224
+
+
+# ============================================================
+# OUR SIX AUTOSORTBIN CLASSES
+# ============================================================
+
+CLASS_NAMES = [
+    "ewaste",
+    "glass",
+    "metal",
+    "organic",
+    "paper",
+    "plastic"
+]
+
+
+# ============================================================
+# LOAD MODEL ONCE
+#
+# IMPORTANT:
+# Do NOT load the model inside predict_waste().
+# The server loads it once when the application starts.
+# ============================================================
+
+interpreter = tflite.Interpreter(
+    model_path=MODEL_PATH,
+    num_threads=4
+)
+
 interpreter.allocate_tensors()
+
+
+# ============================================================
+# INPUT / OUTPUT DETAILS
+# ============================================================
 
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-
-# -----------------------------
-# Class definitions
-# -----------------------------
-OUTPUT_CLASSES = [
-    "battery",
-    "biological",
-    "brown-glass",
-    "cardboard",
-    "clothes",
-    "green-glass",
-    "metal",
-    "paper",
-    "plastic",
-    "shoes",
-    "trash",
-    "white-glass",
-]
-
-CLASS_MAPPING = {
-    "battery": "ewaste",
-    "biological": "organic",
-    "brown-glass": "glass",
-    "cardboard": "paper",
-    "clothes": "organic",
-    "green-glass": "glass",
-    "metal": "metal",
-    "paper": "paper",
-    "plastic": "plastic",
-    "shoes": "organic",
-    "trash": "organic",
-    "white-glass": "glass",
-}
+input_index = input_details[0]["index"]
+output_index = output_details[0]["index"]
 
 
-# -----------------------------
-# Prediction function
-# -----------------------------
-def predict_waste(image_path: str) -> tuple[str, float]:
+# ============================================================
+# PREPROCESSING
+#
+# Must match the preprocessing used for our trained model.
+#
+# RGB
+# ↓
+# 224 x 224
+# ↓
+# Gaussian Blur 3x3
+# ↓
+# Median Filter 3x3
+# ↓
+# Normalize [0,1]
+# ============================================================
+
+def preprocess_image(image_path: str):
+
+    # Read image
+    image = cv2.imread(
+        image_path
+    )
+
+    if image is None:
+
+        raise ValueError(
+            f"Could not read image: {image_path}"
+        )
+
+
+    # BGR → RGB
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB
+    )
+
+
+    # Resize
+    image = cv2.resize(
+        image,
+        (IMG_SIZE, IMG_SIZE),
+        interpolation=cv2.INTER_AREA
+    )
+
+
+    # Gaussian Blur
+    image = cv2.GaussianBlur(
+        image,
+        (3, 3),
+        0
+    )
+
+
+    # Median Filter
+    image = cv2.medianBlur(
+        image,
+        3
+    )
+
+
+    # Normalize [0,1]
+    image = (
+        image.astype(np.float32)
+        / 255.0
+    )
+
+
+    # Add batch dimension
+    image = np.expand_dims(
+        image,
+        axis=0
+    )
+
+
+    return image
+
+
+# ============================================================
+# PREDICTION
+# ============================================================
+
+def predict_waste(
+    image_path: str
+) -> tuple[str, float]:
+
     """
     Predict waste category from image.
 
     Returns:
-        (merged_class, confidence_percentage)
+        (category, confidence_percentage)
+
+    Categories:
+        ewaste
+        glass
+        metal
+        organic
+        paper
+        plastic
     """
 
-    # Load & preprocess image (MUST match training)
-    img = Image.open(image_path).convert("RGB")
-    img = img.resize((224, 224))
 
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    # --------------------------------------------------------
+    # Check image
+    # --------------------------------------------------------
 
-    # Run inference
-    interpreter.set_tensor(input_details[0]["index"], img_array)
+    if not os.path.isfile(
+        image_path
+    ):
+
+        raise FileNotFoundError(
+            f"Image not found: {image_path}"
+        )
+
+
+    # --------------------------------------------------------
+    # Preprocess
+    # --------------------------------------------------------
+
+    image = preprocess_image(
+        image_path
+    )
+
+
+    # --------------------------------------------------------
+    # Inference
+    # --------------------------------------------------------
+
+    interpreter.set_tensor(
+        input_index,
+        image
+    )
+
     interpreter.invoke()
 
-    predictions = interpreter.get_tensor(output_details[0]["index"])
 
-    class_index = int(np.argmax(predictions))
-    confidence = round(float(np.max(predictions)) * 100, 2)
+    # --------------------------------------------------------
+    # Get prediction
+    # --------------------------------------------------------
 
-    raw_class = OUTPUT_CLASSES[class_index]
-    merged_class = CLASS_MAPPING.get(raw_class, "unknown")
+    predictions = interpreter.get_tensor(
+        output_index
+    )[0]
 
-    return merged_class, confidence
+
+    # --------------------------------------------------------
+    # Find highest probability
+    # --------------------------------------------------------
+
+    class_index = int(
+        np.argmax(predictions)
+    )
+
+    confidence = (
+        float(
+            predictions[class_index]
+        ) * 100
+    )
+
+
+    # --------------------------------------------------------
+    # Class
+    # --------------------------------------------------------
+
+    predicted_class = (
+        CLASS_NAMES[class_index]
+    )
+
+
+    return (
+        predicted_class,
+        round(confidence, 2)
+    )

@@ -4,7 +4,8 @@ python-multipart
 requests
 pydantic
 pydantic-settings
-tflite-runtime==2.14.0
+ai-edge-litert==2.1.6
 numpy<2.0
 Pillow
+opencv-python-headless
 python-dotenv
